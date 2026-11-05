@@ -35,9 +35,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -133,22 +135,10 @@ public class HomeActivity extends Activity {
         left.setOrientation(LinearLayout.VERTICAL);
         root.addView(left, new LinearLayout.LayoutParams(0, -1, 0.72f));
 
-        LinearLayout chip = new LinearLayout(this);
-        chip.setGravity(Gravity.CENTER_VERTICAL);
-        listenDot = new View(this);
-        listenDot.setBackground(round(ACCENT, 6));
-        chip.addView(listenDot, new LinearLayout.LayoutParams(dp(14), dp(14)));
-        listen = text("", 21, TEXT_SOFT);
-        listen.setPadding(dp(10), 0, 0, 0);
-        chip.addView(listen);
-        left.addView(chip);
-
         clock = text("", 132, TEXT);
         clock.setTypeface(Typeface.create("sans-serif-thin", Typeface.NORMAL));
         clock.setIncludeFontPadding(false);
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-2, -2);
-        cp.topMargin = dp(18);
-        left.addView(clock, cp);
+        left.addView(clock, new LinearLayout.LayoutParams(-2, -2));
         clock.setOnLongClickListener(v -> {
             menu();
             return true;
@@ -182,10 +172,16 @@ public class HomeActivity extends Activity {
 
         left.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1));
 
-        TextView alexa = text("◉   Parler à Alexa", 26, TEXT);
-        alexa.setGravity(Gravity.CENTER);
+        // One Alexa shortcut: says whether she's listening, and a touch talks to her.
+        LinearLayout alexa = new LinearLayout(this);
+        alexa.setGravity(Gravity.CENTER_VERTICAL);
         alexa.setBackground(round(0xFF0866FF, 32));
-        alexa.setPadding(dp(34), dp(18), dp(34), dp(18));
+        alexa.setPadding(dp(28), dp(16), dp(32), dp(16));
+        listenDot = new View(this);
+        alexa.addView(listenDot, new LinearLayout.LayoutParams(dp(16), dp(16)));
+        listen = text("", 20, TEXT);
+        listen.setPadding(dp(14), 0, 0, 0);
+        alexa.addView(listen);
         alexa.setOnClickListener(v -> WakeService.triggerNow(this));
         left.addView(alexa, new LinearLayout.LayoutParams(-2, -2));
 
@@ -222,8 +218,8 @@ public class HomeActivity extends Activity {
             String d = new SimpleDateFormat("EEEE d MMMM", Locale.FRANCE).format(now);
             date.setText(Character.toUpperCase(d.charAt(0)) + d.substring(1));
             boolean ok = WakeService.running && "à l'écoute".equals(WakeService.status);
-            listen.setText(ok ? "Dites « Alexa »" : WakeService.status);
-            listenDot.setBackground(round(ok ? ACCENT : 0xFFFFB020, 6));
+            listen.setText(ok ? "Dites « Alexa » ou touchez ici" : WakeService.status);
+            listenDot.setBackground(round(ok ? 0xFF7CF5FF : 0xFFFFB020, 8));
             ui.postDelayed(this, 1000);
         }
     };
@@ -243,23 +239,48 @@ public class HomeActivity extends Activity {
             if (ib < 0) ib = Integer.MAX_VALUE;
             return Integer.compare(ia, ib);
         });
+        seedAlexaFolder(all);
         Set<String> hidden = prefs.getStringSet("hidden", Collections.emptySet());
+        // One grid entry per app outside a folder, and one per folder ("dir:<name>"), which
+        // first shows up where its first app would have been.
+        Map<String, ResolveInfo> apps = new HashMap<>();
+        Map<String, List<ResolveInfo>> folders = new HashMap<>();
+        List<String> entries = new ArrayList<>();
+        for (ResolveInfo info : all) {
+            String key = key(info);
+            // Hidden entries are per icon (package/activity): one app can have several icons.
+            if (info.activityInfo.packageName.equals(getPackageName()) || hidden.contains(key)) continue;
+            String folder = prefs.getString("folder:" + key, null);
+            if (folder == null) {
+                apps.put(key, info);
+                entries.add(key);
+            } else {
+                if (!folders.containsKey(folder)) entries.add(DIR + folder);
+                folders.computeIfAbsent(folder, f -> new ArrayList<>()).add(info);
+            }
+        }
+        Collections.sort(entries, (a, b) -> {
+            int ia = order.indexOf(a), ib = order.indexOf(b);
+            if (ia < 0) ia = Integer.MAX_VALUE;
+            if (ib < 0) ib = Integer.MAX_VALUE;
+            return Integer.compare(ia, ib);
+        });
         grid.removeAllViews();
         shown.clear();
-        appsTitle.setText(moving == null ? "Applications" : "Touchez la nouvelle place de l'appli");
-        appsTitle.setTextColor(moving == null ? TEXT_SOFT : ACCENT);
+        shown.addAll(entries);
+        appsTitle.setText("Applications");
+        appsTitle.setTextColor(TEXT_SOFT);
         LinearLayout row = null;
         int n = 0;
-        for (ResolveInfo info : all) {
-            String pkg = info.activityInfo.packageName;
-            // Hidden entries are per icon (package/activity): one app can have several icons.
-            if (pkg.equals(getPackageName()) || hidden.contains(key(info))) continue;
-            shown.add(key(info));
+        for (String entry : entries) {
             if (n % COLUMNS == 0) {
                 row = new LinearLayout(this);
                 grid.addView(row, new LinearLayout.LayoutParams(-1, dp(146)));
             }
-            row.addView(appCell(pm, info), new LinearLayout.LayoutParams(0, -1, 1));
+            View cell = entry.startsWith(DIR)
+                    ? folderCell(pm, entry.substring(DIR.length()), folders.get(entry.substring(DIR.length())))
+                    : appCell(pm, apps.get(entry));
+            row.addView(cell, new LinearLayout.LayoutParams(0, -1, 1));
             n++;
         }
         // Keep the last row's cells the same width as the others.
@@ -271,6 +292,228 @@ public class HomeActivity extends Activity {
 
     private static String key(ResolveInfo info) {
         return info.activityInfo.packageName + "/" + info.activityInfo.name;
+    }
+
+    // ---- folders ----
+
+    private static final String DIR = "dir:";
+    // Everything about Alexa in one place: Meta's Alexa client (its Alexa, Debug Client and
+    // Leaks icons) and Immortal, which installs and repairs it.
+    private static final String ALEXA_FOLDER = "Alexa";
+    private static final String[] ALEXA_PACKAGES = {
+            "com.amazon.alexa.multimodal.falcon", "com.immortal.launcher"};
+
+    /** Files the Alexa apps in their folder once; after that the user decides. */
+    private void seedAlexaFolder(List<ResolveInfo> all) {
+        if (prefs.getBoolean("seeded_alexa_folder", false)) return;
+        SharedPreferences.Editor e = prefs.edit().putBoolean("seeded_alexa_folder", true);
+        for (ResolveInfo info : all) {
+            if (Arrays.asList(ALEXA_PACKAGES).contains(info.activityInfo.packageName)) {
+                e.putString("folder:" + key(info), ALEXA_FOLDER);
+            }
+        }
+        e.apply();
+    }
+
+    private Set<String> folderNames() {
+        Set<String> names = new java.util.TreeSet<>();
+        for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+            if (e.getKey().startsWith("folder:")) names.add(String.valueOf(e.getValue()));
+        }
+        return names;
+    }
+
+    private void setFolder(String key, String folder) {
+        if (folder == null) prefs.edit().remove("folder:" + key).apply();
+        else prefs.edit().putString("folder:" + key, folder).apply();
+        moving = null;
+        loadApps();
+    }
+
+    /** Folder tile: up to four of its apps' icons in a rounded square. */
+    private View folderCell(PackageManager pm, String name, List<ResolveInfo> apps) {
+        String key = DIR + name;
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER);
+        cell.setPadding(dp(4), dp(6), dp(4), dp(6));
+        cell.setBackground(round(0x00000000, 18));
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(6), dp(6), dp(6), dp(6));
+        box.setBackground(round(0x33FFFFFF, 20));
+        for (int r = 0; r < 2; r++) {
+            LinearLayout line = new LinearLayout(this);
+            for (int c = 0; c < 2; c++) {
+                int i = r * 2 + c;
+                View mini = i < apps.size() ? iconView(pm, apps.get(i), 14) : new View(this);
+                LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(dp(30), dp(30));
+                mp.setMargins(dp(1), dp(1), dp(1), dp(1));
+                line.addView(mini, mp);
+            }
+            box.addView(line);
+        }
+        cell.addView(box, new LinearLayout.LayoutParams(dp(76), dp(76)));
+        TextView label = text(name, 17, TEXT);
+        label.setGravity(Gravity.CENTER);
+        label.setMaxLines(1);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
+        np.topMargin = dp(8);
+        cell.addView(label, np);
+        cell.setOnClickListener(v -> openFolder(pm, name, apps));
+        makeDraggable(cell, key, () -> folderMenu(name));
+        return cell;
+    }
+
+    private void openFolder(PackageManager pm, String name, List<ResolveInfo> apps) {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(16), dp(8), dp(16), dp(8));
+        AlertDialog[] dialog = new AlertDialog[1];
+        LinearLayout row = null;
+        for (int i = 0; i < apps.size(); i++) {
+            ResolveInfo info = apps.get(i);
+            String key = key(info);
+            String label = prefs.getString("name:" + key, info.loadLabel(pm).toString());
+            if (i % 4 == 0) {
+                row = new LinearLayout(this);
+                list.addView(row);
+            }
+            LinearLayout opt = new LinearLayout(this);
+            opt.setOrientation(LinearLayout.VERTICAL);
+            opt.setGravity(Gravity.CENTER);
+            opt.setPadding(dp(8), dp(10), dp(8), dp(10));
+            opt.addView(iconView(pm, info, 36), new LinearLayout.LayoutParams(dp(68), dp(68)));
+            TextView n = text(label, 15, TEXT);
+            n.setGravity(Gravity.CENTER);
+            n.setMaxLines(1);
+            n.setEllipsize(TextUtils.TruncateAt.END);
+            opt.addView(n, new LinearLayout.LayoutParams(-1, -2));
+            opt.setOnClickListener(v -> {
+                dialog[0].dismiss();
+                launch(info);
+            });
+            opt.setOnLongClickListener(v -> {
+                dialog[0].dismiss();
+                appMenu(info.activityInfo.packageName, key, label);
+                return true;
+            });
+            row.addView(opt, new LinearLayout.LayoutParams(dp(130), -2));
+        }
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list);
+        dialog[0] = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(name)
+                .setView(sv)
+                .setNegativeButton("Fermer", null)
+                .show();
+    }
+
+    private void folderMenu(String name) {
+        moving = null;
+        loadApps();
+        menuDialog(name, new String[]{"Renommer le dossier", "Mettre au début", "Mettre à la fin",
+                "Défaire le dossier"}, new Runnable[]{
+                () -> askName("Renommer le dossier", name, newName -> renameFolder(name, newName)),
+                () -> moveToStart(DIR + name),
+                () -> {
+                    moving = DIR + name;
+                    moveTo(null);
+                },
+                () -> renameFolder(name, null),
+        });
+    }
+
+    /** Renames a folder, or empties it back onto the home screen when newName is null. */
+    private void renameFolder(String name, String newName) {
+        SharedPreferences.Editor e = prefs.edit();
+        for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            if (entry.getKey().startsWith("folder:") && name.equals(entry.getValue())) {
+                if (newName == null) e.remove(entry.getKey());
+                else e.putString(entry.getKey(), newName);
+            }
+        }
+        List<String> order = savedOrder();
+        int at = order.indexOf(DIR + name);
+        if (at >= 0) {
+            if (newName == null) order.remove(at);
+            else order.set(at, DIR + newName);
+            e.putString("order", TextUtils.join("\n", order));
+        }
+        e.apply();
+        loadApps();
+    }
+
+    /** Lets the user pick a folder for an app, make a new one, or take it out of its folder. */
+    private void chooseFolder(String key) {
+        List<String> names = new ArrayList<>(folderNames());
+        String current = prefs.getString("folder:" + key, null);
+        List<String> labels = new ArrayList<>(names);
+        labels.add("Nouveau dossier…");
+        if (current != null) labels.add("Sortir du dossier « " + current + " »");
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Mettre dans un dossier")
+                .setItems(labels.toArray(new String[0]), (d, which) -> {
+                    if (which < names.size()) setFolder(key, names.get(which));
+                    else if (which == names.size()) askName("Nouveau dossier", "", n -> setFolder(key, n));
+                    else setFolder(key, null);
+                })
+                .show();
+    }
+
+    private void askName(String title, String initial, java.util.function.Consumer<String> done) {
+        android.widget.EditText input = new android.widget.EditText(this);
+        input.setText(initial);
+        input.setSelectAllOnFocus(true);
+        input.setTextSize(20);
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(dp(24), dp(8), dp(24), 0);
+        box.addView(input);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title)
+                .setView(box)
+                .setPositiveButton("OK", (d, w) -> {
+                    String s = input.getText().toString().trim();
+                    if (!s.isEmpty()) done.accept(s);
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void menuDialog(String title, String[] labels, Runnable[] actions) {
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title)
+                .setItems(labels, (d, which) -> actions[which].run())
+                .show();
+    }
+
+    private View iconView(PackageManager pm, ResolveInfo info, int emojiSp) {
+        int custom = prefs.getInt("icon:" + key(info), -1);
+        if (custom >= 0 && custom < ICONS.length) return iconTile(custom, emojiSp);
+        ImageView icon = new ImageView(this);
+        try {
+            icon.setImageDrawable(info.loadIcon(pm));
+        } catch (RuntimeException ignored) {
+        }
+        return icon;
+    }
+
+    private void launch(ResolveInfo info) {
+        Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                .setClassName(info.activityInfo.packageName, info.activityInfo.name)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        try {
+            startActivity(i);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void moveToStart(String key) {
+        if (!shown.isEmpty() && !shown.get(0).equals(key)) {
+            moving = key;
+            moveTo(shown.get(0));
+        }
     }
 
     private List<String> savedOrder() {
@@ -299,17 +542,7 @@ public class HomeActivity extends Activity {
         cell.setGravity(Gravity.CENTER);
         cell.setPadding(dp(4), dp(6), dp(4), dp(6));
         cell.setBackground(round(key.equals(moving) ? 0x5500CAFF : 0x00000000, 18));
-        int custom = prefs.getInt("icon:" + key, -1);
-        if (custom >= 0 && custom < ICONS.length) {
-            cell.addView(iconTile(custom, 40), new LinearLayout.LayoutParams(dp(76), dp(76)));
-        } else {
-            ImageView icon = new ImageView(this);
-            try {
-                icon.setImageDrawable(info.loadIcon(pm));
-            } catch (RuntimeException ignored) {
-            }
-            cell.addView(icon, new LinearLayout.LayoutParams(dp(76), dp(76)));
-        }
+        cell.addView(iconView(pm, info, 40), new LinearLayout.LayoutParams(dp(76), dp(76)));
         TextView name = text(label, 17, TEXT);
         name.setGravity(Gravity.CENTER);
         name.setMaxLines(1);
@@ -317,17 +550,16 @@ public class HomeActivity extends Activity {
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
         np.topMargin = dp(8);
         cell.addView(name, np);
-        cell.setOnClickListener(v -> {
-            Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                    .setClassName(pkg, info.activityInfo.name)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            try {
-                startActivity(i);
-            } catch (RuntimeException ignored) {
-            }
-        });
-        // Long press picks the app up: drop it on another app to take that place, or let go
-        // where it was to get the menu.
+        cell.setOnClickListener(v -> launch(info));
+        makeDraggable(cell, key, () -> appMenu(pkg, key, label));
+        return cell;
+    }
+
+    /**
+     * Long press picks a grid entry up: drop it on another entry to take that place (an app
+     * dropped on a folder goes into it), or let go where it was to get its menu.
+     */
+    private void makeDraggable(View cell, String key, Runnable menu) {
         cell.setOnLongClickListener(v -> {
             moving = key;
             appsTitle.setText("Glissez l'appli à sa nouvelle place");
@@ -353,8 +585,11 @@ public class HomeActivity extends Activity {
                 case DragEvent.ACTION_DROP:
                     v.setBackground(round(0x00000000, 18));
                     // Rebuild the grid after the drag finishes, not while it dispatches.
-                    if (key.equals(moving)) ui.post(() -> appMenu(pkg, key, label));
-                    else ui.post(() -> moveTo(key));
+                    String dragged = moving;
+                    if (key.equals(dragged)) ui.post(menu);
+                    else if (key.startsWith(DIR) && dragged != null && !dragged.startsWith(DIR)) {
+                        ui.post(() -> setFolder(dragged, key.substring(DIR.length())));
+                    } else ui.post(() -> moveTo(key));
                     return true;
                 case DragEvent.ACTION_DRAG_ENDED:
                     dragY = -1;
@@ -368,7 +603,6 @@ public class HomeActivity extends Activity {
                     return true;
             }
         });
-        return cell;
     }
 
     private boolean trackDrag(View v, DragEvent e) {
@@ -399,40 +633,31 @@ public class HomeActivity extends Activity {
     private void appMenu(String pkg, String key, String label) {
         moving = null;
         loadApps();
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(label)
-                    .setItems(removable(pkg)
-                            ? new String[]{"Renommer", "Mettre au début", "Mettre à la fin",
-                                    "Masquer de l'accueil", "Changer l'icône", "Infos de l'appli", "Désinstaller"}
-                            : new String[]{"Renommer", "Mettre au début", "Mettre à la fin",
-                                    "Masquer de l'accueil", "Changer l'icône", "Infos de l'appli"}, (d, which) -> {
-                        if (which == 6) {
-                            confirmUninstall(pkg, label);
-                            return;
-                        }
-                        if (which == 0) {
-                            rename(key, label);
-                        } else if (which == 1) {
-                            if (!shown.isEmpty() && !shown.get(0).equals(key)) {
-                                moving = key;
-                                moveTo(shown.get(0));
-                            }
-                        } else if (which == 2) {
-                            moving = key;
-                            moveTo(null);
-                        } else if (which == 3) {
-                            Set<String> h = new HashSet<>(prefs.getStringSet("hidden", Collections.emptySet()));
-                            h.add(key);
-                            prefs.edit().putStringSet("hidden", h).apply();
-                            loadApps();
-                        } else if (which == 4) {
-                            pickIcon(key, label);
-                        } else {
-                            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                    Uri.parse("package:" + pkg)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                        }
-                    })
-                    .show();
+        List<String> labels = new ArrayList<>(Arrays.asList("Renommer", "Mettre au début",
+                "Mettre à la fin", "Mettre dans un dossier…", "Masquer de l'accueil",
+                "Changer l'icône", "Infos de l'appli"));
+        List<Runnable> actions = new ArrayList<>(Arrays.asList(
+                () -> rename(key, label),
+                () -> moveToStart(key),
+                () -> {
+                    moving = key;
+                    moveTo(null);
+                },
+                () -> chooseFolder(key),
+                () -> {
+                    Set<String> h = new HashSet<>(prefs.getStringSet("hidden", Collections.emptySet()));
+                    h.add(key);
+                    prefs.edit().putStringSet("hidden", h).apply();
+                    loadApps();
+                },
+                () -> pickIcon(key, label),
+                () -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + pkg)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))));
+        if (removable(pkg)) {
+            labels.add("Désinstaller");
+            actions.add(() -> confirmUninstall(pkg, label));
+        }
+        menuDialog(label, labels.toArray(new String[0]), actions.toArray(new Runnable[0]));
     }
 
     /** Apps the user installed; Meta's system apps can't be removed this way. */
