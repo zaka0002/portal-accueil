@@ -8,7 +8,7 @@ The easiest way to install it is [JailPortal](https://github.com/zaka0002/jailpo
 
 ## The home screen
 
-- Large clock and date, weather for the next 4 days ([Open-Meteo](https://open-meteo.com/), no account), a **Talk to Alexa** button and the listening state.
+- Large clock and date, weather for the next 4 days ([Open-Meteo](https://open-meteo.com/), no account), and one Alexa button that shows the listening state.
 - All your apps, 4 per row. Long-press an app and drag it onto another to move it there; near the top or bottom edge the list scrolls by itself.
 - Long-press an app and let go to rename it, move it to the start or the end, hide it, give it another icon (handy for Meta's lab-flask icons), open its info or uninstall it.
 - Folders: long-press an app → "Mettre dans un dossier…", or drop it on a folder. Meta's Alexa client and Immortal start out in an "Alexa" folder.
