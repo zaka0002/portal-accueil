@@ -11,6 +11,8 @@ The easiest way to install it is [JailPortal](https://github.com/zaka0002/jailpo
 - Large clock and date, weather for the next 4 days ([Open-Meteo](https://open-meteo.com/), no account), a **Talk to Alexa** button and the listening state.
 - All your apps, 4 per row. Long-press an app and drag it onto another to move it there; near the top or bottom edge the list scrolls by itself.
 - Long-press an app and let go to rename it, move it to the start or the end, hide it, give it another icon (handy for Meta's lab-flask icons), open its info or uninstall it.
+- Folders: long-press an app → "Mettre dans un dossier…", or drop it on a folder. Meta's Alexa client and Immortal start out in an "Alexa" folder.
+- Meta's apps that only have the Portal's lab-flask placeholder get a camera, settings, home or search icon from their name.
 - Long-press the clock to bring hidden apps back, go back to alphabetical order, see the listening state or open Android settings.
 
 Weather is set to Reims (`CITY` and `WEATHER_URL` in `HomeActivity.java`).
