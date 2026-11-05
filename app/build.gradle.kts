@@ -12,8 +12,8 @@ android {
         // Portal runs Android 10; targeting 29 keeps background mic + activity launch rules simple.
         targetSdk = 29
         // Bump on any model change: the model is re-copied out of the APK when this changes.
-        versionCode = 8
-        versionName = "2.6"
+        versionCode = 10
+        versionName = "2.8"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }

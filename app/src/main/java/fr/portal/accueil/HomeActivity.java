@@ -493,15 +493,14 @@ public class HomeActivity extends Activity {
         FrameLayout box = new FrameLayout(this);
         box.setPadding(dp(24), dp(8), dp(24), 0);
         box.addView(input);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        showWithKeyboard(new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(title)
                 .setView(box)
                 .setPositiveButton("OK", (d, w) -> {
                     String s = input.getText().toString().trim();
                     if (!s.isEmpty()) done.accept(s);
                 })
-                .setNegativeButton("Annuler", null)
-                .show();
+                .setNegativeButton("Annuler", null), input);
     }
 
     private void menuDialog(String title, String[] labels, Runnable[] actions) {
@@ -847,7 +846,7 @@ public class HomeActivity extends Activity {
         FrameLayout box = new FrameLayout(this);
         box.setPadding(dp(24), dp(8), dp(24), 0);
         box.addView(input);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        showWithKeyboard(new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Renommer")
                 .setView(box)
                 .setPositiveButton("OK", (d, w) -> {
@@ -860,8 +859,15 @@ public class HomeActivity extends Activity {
                     prefs.edit().remove("name:" + key).apply();
                     loadApps();
                 })
-                .setNegativeButton("Annuler", null)
-                .show();
+                .setNegativeButton("Annuler", null), input);
+    }
+
+    /** A text dialog opens with its keyboard up, instead of waiting for a tap in the field. */
+    private void showWithKeyboard(AlertDialog.Builder builder, android.widget.EditText input) {
+        AlertDialog d = builder.create();
+        d.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        d.show();
+        input.requestFocus();
     }
 
     /** Long press on the clock: bring back hidden apps, or open the listening status page. */

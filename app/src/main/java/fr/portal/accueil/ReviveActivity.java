@@ -11,6 +11,16 @@ import android.os.Looper;
  */
 public class ReviveActivity extends Activity {
     @Override
+    protected void onCreate(android.os.Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        // Never take input focus or touches: it shows up every ~10 s over other apps, and
+        // grabbing focus closed their keyboard while the user was typing.
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         WakeService.requestReopen();
