@@ -86,7 +86,28 @@ public class HomeActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
         }
         showWeather(prefs.getString("weather", null));
+        // Apps installed or removed while the home screen is showing (adb, JailPortal, the
+        // uninstall menu) appear or go right away.
+        android.content.IntentFilter f = new android.content.IntentFilter();
+        f.addAction(Intent.ACTION_PACKAGE_ADDED);
+        f.addAction(Intent.ACTION_PACKAGE_REMOVED);
+        f.addAction(Intent.ACTION_PACKAGE_CHANGED);
+        f.addDataScheme("package");
+        registerReceiver(packagesChanged, f);
     }
+
+    @Override
+    protected void onDestroy() {
+        unregisterReceiver(packagesChanged);
+        super.onDestroy();
+    }
+
+    private final android.content.BroadcastReceiver packagesChanged = new android.content.BroadcastReceiver() {
+        @Override
+        public void onReceive(android.content.Context c, Intent i) {
+            if (moving == null) loadApps();
+        }
+    };
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
@@ -103,7 +124,6 @@ public class HomeActivity extends Activity {
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         loadApps();
         ui.post(tick);
-        if (System.currentTimeMillis() - weatherAt > WEATHER_EVERY_MS) fetchWeather();
     }
 
     @Override
@@ -220,6 +240,8 @@ public class HomeActivity extends Activity {
             boolean ok = WakeService.running && "à l'écoute".equals(WakeService.status);
             listen.setText(ok ? "Dites « Alexa » ou touchez ici" : WakeService.status);
             listenDot.setBackground(round(ok ? 0xFF7CF5FF : 0xFFFFB020, 8));
+            // The home screen can stay in front for hours: refresh the weather from here too.
+            if (System.currentTimeMillis() - weatherAt > WEATHER_EVERY_MS) fetchWeather();
             ui.postDelayed(this, 1000);
         }
     };
@@ -240,6 +262,7 @@ public class HomeActivity extends Activity {
             return Integer.compare(ia, ib);
         });
         seedAlexaFolder(all);
+        findFlaskIcons(pm, all);
         Set<String> hidden = prefs.getStringSet("hidden", Collections.emptySet());
         // One grid entry per app outside a folder, and one per folder ("dir:<name>"), which
         // first shows up where its first app would have been.
@@ -354,9 +377,9 @@ public class HomeActivity extends Activity {
             box.addView(line);
         }
         cell.addView(box, new LinearLayout.LayoutParams(dp(76), dp(76)));
-        TextView label = text(name, 17, TEXT);
+        TextView label = text(name, 16, TEXT);
         label.setGravity(Gravity.CENTER);
-        label.setMaxLines(1);
+        label.setMaxLines(2);
         label.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
         np.topMargin = dp(8);
@@ -491,6 +514,10 @@ public class HomeActivity extends Activity {
     private View iconView(PackageManager pm, ResolveInfo info, int emojiSp) {
         int custom = prefs.getInt("icon:" + key(info), -1);
         if (custom >= 0 && custom < ICONS.length) return iconTile(custom, emojiSp);
+        if (custom != KEEP_ICON && (flaskIcons.contains(iconHash(pm, info))
+                || FLASK_PACKAGES.contains(info.activityInfo.packageName))) {
+            return iconTile(autoIcon(info.loadLabel(pm).toString()), emojiSp);
+        }
         ImageView icon = new ImageView(this);
         try {
             icon.setImageDrawable(info.loadIcon(pm));
@@ -543,9 +570,9 @@ public class HomeActivity extends Activity {
         cell.setPadding(dp(4), dp(6), dp(4), dp(6));
         cell.setBackground(round(key.equals(moving) ? 0x5500CAFF : 0x00000000, 18));
         cell.addView(iconView(pm, info, 40), new LinearLayout.LayoutParams(dp(76), dp(76)));
-        TextView name = text(label, 17, TEXT);
+        TextView name = text(label, 16, TEXT);
         name.setGravity(Gravity.CENTER);
-        name.setMaxLines(1);
+        name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
         np.topMargin = dp(8);
@@ -698,7 +725,67 @@ public class HomeActivity extends Activity {
             {"💬", "Messages", 0xFF00ACC1}, {"📞", "Appels", 0xFF2E7D32}, {"📅", "Agenda", 0xFF3949AB},
             {"🔧", "Outils", 0xFF546E7A}, {"🎮", "Jeux", 0xFF5E35B1}, {"📁", "Fichiers", 0xFFFFB300},
             {"🔒", "Sécurité", 0xFF37474F}, {"⭐", "Favori", 0xFFF4511E}, {"🧪", "Labo", 0xFF6D4C41},
+            // Added later: keep appending, the saved choices are indexes.
+            {"🔍", "Recherche", 0xFF00897B}, {"📱", "Appli", 0xFF455A64},
     };
+    private static final int ICON_SETTINGS = 0, ICON_CAMERA = 1, ICON_HOME = 3, ICON_SEARCH = 18,
+            ICON_APP = 19;
+
+    /**
+     * Meta's apps that ship no icon of their own show the Portal's default lab flask; give
+     * them one that says what they are, from their name.
+     */
+    // "icon:<key>" value for an app whose own icon the user wants even if it is the flask.
+    private static final int KEEP_ICON = -2;
+
+    // The flask is a real drawable, the same one in apps that share nothing else: an icon that
+    // shows up in several different packages is that placeholder.
+    private final Map<String, Integer> iconHashes = new HashMap<>();
+    private final Set<Integer> flaskIcons = new HashSet<>();
+    // Same flask, drawn slightly differently, in a package whose icons nothing else shares.
+    private static final Set<String> FLASK_PACKAGES = new HashSet<>(Arrays.asList(
+            "com.facebook.portal.aiservice"));
+
+    private int iconHash(PackageManager pm, ResolveInfo info) {
+        Integer h = iconHashes.get(key(info));
+        if (h != null) return h;
+        int hash = 0;
+        try {
+            android.graphics.drawable.Drawable d = info.loadIcon(pm);
+            android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(24, 24,
+                    android.graphics.Bitmap.Config.ARGB_8888);
+            d.setBounds(0, 0, 24, 24);
+            d.draw(new android.graphics.Canvas(b));
+            int[] px = new int[24 * 24];
+            b.getPixels(px, 0, 24, 0, 0, 24, 24);
+            b.recycle();
+            hash = Arrays.hashCode(px);
+        } catch (RuntimeException ignored) {
+        }
+        iconHashes.put(key(info), hash);
+        return hash;
+    }
+
+    private void findFlaskIcons(PackageManager pm, List<ResolveInfo> all) {
+        Map<Integer, Set<String>> packagesByIcon = new HashMap<>();
+        for (ResolveInfo info : all) {
+            packagesByIcon.computeIfAbsent(iconHash(pm, info), h -> new HashSet<>())
+                    .add(info.activityInfo.packageName);
+        }
+        flaskIcons.clear();
+        for (Map.Entry<Integer, Set<String>> e : packagesByIcon.entrySet()) {
+            if (e.getKey() != 0 && e.getValue().size() >= 2) flaskIcons.add(e.getKey());
+        }
+    }
+
+    private static int autoIcon(String label) {
+        String l = label.toLowerCase(Locale.ROOT);
+        if (l.matches(".*(photo|caméra|camera|selfie).*")) return ICON_CAMERA;
+        if (l.matches(".*(paramètre|setting|réglage).*")) return ICON_SETTINGS;
+        if (l.matches(".*(home|accueil).*")) return ICON_HOME;
+        if (l.matches(".*(search|recherche).*")) return ICON_SEARCH;
+        return ICON_APP;
+    }
 
     private View iconTile(int i, int sp) {
         TextView t = text((String) ICONS[i][0], sp, TEXT);
@@ -745,7 +832,7 @@ public class HomeActivity extends Activity {
                 .setTitle("Icône de « " + label + " »")
                 .setView(sv)
                 .setNeutralButton("Icône d'origine", (d, w) -> {
-                    prefs.edit().remove("icon:" + key).apply();
+                    prefs.edit().putInt("icon:" + key, KEEP_ICON).apply();
                     loadApps();
                 })
                 .setNegativeButton("Annuler", null)
