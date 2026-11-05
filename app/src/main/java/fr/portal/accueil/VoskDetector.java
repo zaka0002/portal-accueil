@@ -18,12 +18,17 @@ import java.io.OutputStream;
 
 /**
  * Keyword spotting with Vosk and a small French model: the recognizer is restricted to the
- * grammar ["alexa", "[unk]"], so anything else lands on [unk]. Feed 16 kHz mono PCM chunks.
+ * grammar ["alexa", "stop", "arrête", "[unk]"], so anything else lands on [unk]. Feed 16 kHz
+ * mono PCM chunks.
  */
 public class VoskDetector implements AutoCloseable {
     private static final String TAG = "PortalAccueil";
     private static final String ASSET_DIR = "model-fr";
     private static final String KEYWORD = "alexa";
+    private static final String[] STOP_WORDS = {"stop", "arrête"};
+
+    /** What a final result asked for. */
+    public static final int NONE = 0, WAKE = 1, STOP = 2;
     // Only a final result counts, and its word confidence must reach this: partial hypotheses
     // fired on stream-start noise every time the mic was reopened.
     private static final double MIN_CONFIDENCE = 0.85;
@@ -38,7 +43,9 @@ public class VoskDetector implements AutoCloseable {
         LibVosk.setLogLevel(LogLevel.WARNINGS);
         File dir = unpackModel(ctx);
         model = new Model(dir.getAbsolutePath());
-        recognizer = new Recognizer(model, sampleRate, "[\"" + KEYWORD + "\", \"[unk]\"]");
+        StringBuilder grammar = new StringBuilder("[\"" + KEYWORD + "\"");
+        for (String w : STOP_WORDS) grammar.append(", \"").append(w).append('"');
+        recognizer = new Recognizer(model, sampleRate, grammar.append(", \"[unk]\"]").toString());
         recognizer.setWords(true);
     }
 
@@ -46,10 +53,16 @@ public class VoskDetector implements AutoCloseable {
         recognizer.reset();
     }
 
-    /** @return true when a final result contains "alexa" with enough confidence. */
-    public boolean process(short[] chunk) {
-        if (!recognizer.acceptWaveForm(chunk, chunk.length)) return false;
+    /**
+     * @param lenient while Alexa is answering: "alexa" may be followed by other speech, since
+     *                the user talks over her (her own voice is what follows it otherwise), and
+     *                "stop" counts on its own
+     * @return WAKE or STOP when a final result holds "alexa" with enough confidence, else NONE
+     */
+    public int process(short[] chunk, boolean lenient) {
+        if (!recognizer.acceptWaveForm(chunk, chunk.length)) return NONE;
         double best = -1;
+        double bestStop = -1;
         String text = "";
         try {
             JSONObject res = new JSONObject(recognizer.getResult());
@@ -58,21 +71,37 @@ public class VoskDetector implements AutoCloseable {
             if (words != null) {
                 for (int i = 0; i < words.length(); i++) {
                     JSONObject w = words.getJSONObject(i);
-                    if (KEYWORD.equals(w.optString("word"))) best = Math.max(best, w.optDouble("conf", 0));
+                    String word = w.optString("word");
+                    if (KEYWORD.equals(word)) best = Math.max(best, w.optDouble("conf", 0));
+                    for (String s : STOP_WORDS) {
+                        if (s.equals(word)) bestStop = Math.max(bestStop, w.optDouble("conf", 0));
+                    }
                 }
             }
         } catch (Exception e) {
-            return false;
+            return NONE;
         }
         if (best >= 0) {
             lastHeard = String.format(java.util.Locale.ROOT, "%s (confiance %.2f)", text, best);
         } else if (!text.isEmpty()) {
             lastHeard = text;
         }
-        // "alexa" must end the utterance (silence right after it): inside running speech (TV,
-        // conversation) Vosk's two-word grammar maps look-alike syllables onto it, which gave
-        // "alexa [unk]" false triggers; "[unk] alexa" is how real calls often come out.
-        return best >= MIN_CONFIDENCE && text.trim().endsWith(KEYWORD);
+        // While she answers, "stop" alone is enough: over her voice "alexa" often comes out as [unk].
+        if (lenient && best < MIN_CONFIDENCE) return bestStop >= MIN_CONFIDENCE ? STOP : NONE;
+        if (best < MIN_CONFIDENCE) return NONE;
+        String[] words = text.trim().split("\\s+");
+        int at = java.util.Arrays.asList(words).lastIndexOf(KEYWORD);
+        if (at < 0) return NONE;
+        boolean stop = false;
+        for (int i = at + 1; i < words.length; i++) {
+            for (String w : STOP_WORDS) stop |= w.equals(words[i]);
+        }
+        if (lenient) return stop ? STOP : WAKE;
+        // Otherwise "alexa" must end the utterance, or be followed by a stop word only: inside
+        // running speech (TV, conversation) Vosk's small grammar maps look-alike syllables onto
+        // it, which gave "alexa [unk]" false triggers; "[unk] alexa" is how real calls often come out.
+        if (at == words.length - 1) return WAKE;
+        return stop && at == words.length - 2 ? STOP : NONE;
     }
 
     @Override

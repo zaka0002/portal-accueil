@@ -141,7 +141,7 @@ public class WakeService extends Service {
                     reviveAndWait();
                     needRevive = false;
                 }
-                AudioRecord rec = openMic();
+                AudioRecord rec = openMic(bargeIn);
                 if (rec == null) {
                     status = "micro indisponible, nouvel essai…";
                     SystemClock.sleep(3000);
@@ -151,7 +151,11 @@ public class WakeService extends Service {
                 det.reset();
                 long openedAt = SystemClock.elapsedRealtime();
                 boolean fired = false;
+                boolean reopen = false;
+                boolean stopAsked = false;
                 int silentChecks = 0;
+                int quietChecks = 0;
+                int bargeFrames = 0;
                 int frames = 0;
                 // Start from the detector's last text so a reopen doesn't re-log the previous word.
                 String heard = det.lastHeard;
@@ -161,6 +165,16 @@ public class WakeService extends Service {
                         // Silence watchdog: ignore the first seconds (policy settles), then require
                         // ~3 s of silenced capture with nobody else recording before reviving.
                         long now = SystemClock.elapsedRealtime();
+                        // Alexa's answer is over once nothing assistant-like has played or
+                        // recorded for ~1.5 s: stop talking over her and go back home.
+                        if (bargeIn && ++bargeFrames % 10 == 0) {
+                            quietChecks = alexaBusy(rec.getAudioSessionId()) ? 0 : quietChecks + 1;
+                            if (quietChecks >= 3 || now - bargeStart > 60000) {
+                                endBargeIn(now);
+                                reopen = true; // back to the normal mic source
+                                break;
+                            }
+                        }
                         if (++frames % 10 == 0 && now - openedAt > 3000) {
                             silentChecks = isSilenced(rec) ? silentChecks + 1 : 0;
                             if (silentChecks >= 3 && othersRecording(rec.getAudioSessionId()) == 0
@@ -171,7 +185,8 @@ public class WakeService extends Service {
                                 break;
                             }
                         }
-                        boolean hit = det.process(chunk);
+                        int result = det.process(chunk, bargeIn);
+                        boolean hit = result != VoskDetector.NONE;
                         boolean warmup = now - openedAt < WARMUP_MS;
                         if (!det.lastHeard.equals(heard)) {
                             heard = det.lastHeard;
@@ -187,7 +202,10 @@ public class WakeService extends Service {
                         }
                         if (hit || manualTrigger) {
                             fired = true;
-                            journal(manualTrigger ? "bouton Alexa" : "Alexa détecté");
+                            stopAsked = result == VoskDetector.STOP;
+                            journal(manualTrigger ? "bouton Alexa"
+                                    : stopAsked ? "« Alexa stop » détecté"
+                                    : bargeIn ? "Alexa détecté pendant sa réponse" : "Alexa détecté");
                             manualTrigger = false;
                             break;
                         }
@@ -200,18 +218,35 @@ public class WakeService extends Service {
                 if (fired) {
                     triggers++;
                     status = "Alexa détecté !";
-                    boolean fromHome = HomeActivity.inFront;
+                    // Talking over Alexa keeps where the first turn started from.
+                    boolean fromHome = bargeIn ? bargeFromHome : HomeActivity.inFront;
+                    bargeIn = false;
+                    // falcon has no stop command: pausing media stops music, and a new LISTEN
+                    // cuts off whatever she is saying (then times out on silence).
+                    if (stopAsked) pauseMedia();
                     showCover();
                     launchAlexa();
                     new Thread(WakeService::beep, "beep").start(); // don't delay Alexa
 
-                    waitForAlexaDone();
-                    hideCover();
-                    // Coming back to the home screen both hides falcon's leftover page and puts
-                    // us on top again, which is all the mic needs; the revive trick is only for
-                    // when another app was in front.
-                    needRevive = !(fromHome && returnHome());
-                } else if (!stop && !needRevive) {
+                    if (waitForListenDone()) {
+                        // She is answering now. Listen over her answer, so "Alexa" or
+                        // "Alexa stop" can interrupt it. Only the app in front gets the mic
+                        // (with falcon in front ours stayed silenced the whole answer), so go
+                        // back home right away: falcon keeps talking in the background.
+                        bargeIn = true;
+                        bargeFromHome = fromHome;
+                        bargeStart = SystemClock.elapsedRealtime();
+                        hideCover();
+                        needRevive = !(fromHome && returnHome());
+                    } else {
+                        waitForAlexaDone();
+                        hideCover();
+                        // Coming back to the home screen both hides falcon's leftover page and
+                        // puts us on top again, which is all the mic needs; the revive trick is
+                        // only for when another app was in front.
+                        needRevive = !(fromHome && returnHome());
+                    }
+                } else if (!stop && !needRevive && !reopen) {
                     Log.w(TAG, "lecture micro interrompue, réouverture");
                     SystemClock.sleep(500);
                 }
@@ -223,12 +258,18 @@ public class WakeService extends Service {
         running = false;
     }
 
-    private AudioRecord openMic() {
+    /**
+     * @param echoCancel while Alexa talks: VOICE_COMMUNICATION turns on the Portal's echo
+     *                   canceller, so her voice doesn't drown out the user's "Alexa"
+     */
+    private AudioRecord openMic(boolean echoCancel) {
         int min = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT);
         int size = Math.max(min, CHUNK * 2 * 4);
         try {
-            AudioRecord rec = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            int source = echoCancel ? MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                    : MediaRecorder.AudioSource.VOICE_RECOGNITION;
+            AudioRecord rec = new AudioRecord(source,
                     SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, size);
             if (rec.getState() != AudioRecord.STATE_INITIALIZED) {
                 rec.release();
@@ -268,47 +309,78 @@ public class WakeService extends Service {
     }
 
     /**
-     * Waits until Alexa has stopped listening and speaking (or 60 s), so reviving won't interrupt it.
-     * With falcon, its TURN_DONE broadcast ends the turn; a TURN_DONE right after LISTEN is the
-     * known cold-start abort (first turn after falcon's activity was created), so LISTEN is re-fired
-     * once. Either way we then wait for the mic and Alexa's speech to go quiet.
+     * Waits (up to 60 s) for falcon to finish listening, i.e. its TURN_DONE broadcast. One right
+     * after LISTEN is the known cold-start abort (first turn after falcon's activity was
+     * created), so LISTEN is re-fired once.
+     *
+     * @return true once falcon has heard the request and moved on to answering
      */
-    private void waitForAlexaDone() {
-        android.media.AudioManager am = getSystemService(android.media.AudioManager.class);
+    private boolean waitForListenDone() {
+        if (!usingFalcon) return false;
         long start = SystemClock.elapsedRealtime();
-        if (usingFalcon) {
-            boolean retried = false;
-            while (!stop && SystemClock.elapsedRealtime() - start < 60000) {
-                if (turnDoneAt != 0) {
-                    if (!retried && turnDoneAt - listenAt < FALCON_COLD_ABORT_MS) {
-                        retried = true;
-                        turnDoneAt = 0;
-                        journal("Alexa : échec à froid, nouvelle écoute");
-                        sendFalconListen(this);
-                    } else {
-                        break;
-                    }
+        boolean retried = false;
+        while (!stop && SystemClock.elapsedRealtime() - start < 60000) {
+            if (turnDoneAt != 0) {
+                if (!retried && turnDoneAt - listenAt < FALCON_COLD_ABORT_MS) {
+                    retried = true;
+                    turnDoneAt = 0;
+                    journal("Alexa : échec à froid, nouvelle écoute");
+                    sendFalconListen(this);
+                } else {
+                    journal("Alexa a écouté (" + (SystemClock.elapsedRealtime() - start) + " ms), réponse en cours");
+                    return true;
                 }
-                SystemClock.sleep(100);
             }
-        } else {
-            SystemClock.sleep(2000); // let Alexa open its mic
+            SystemClock.sleep(100);
         }
+        return false;
+    }
+
+    /** Waits until Alexa has stopped listening and speaking (or 60 s), with our mic released. */
+    private void waitForAlexaDone() {
+        long start = SystemClock.elapsedRealtime();
+        if (!usingFalcon) SystemClock.sleep(2000); // let the Alexa app open its mic
         int quiet = 0;
         while (!stop && quiet < 3 && SystemClock.elapsedRealtime() - start < 60000) {
-            boolean busy = othersRecording(-1) > 0; // our mic is released here
-            for (android.media.AudioPlaybackConfiguration p : am.getActivePlaybackConfigurations()) {
-                int usage = p.getAudioAttributes().getUsage();
-                if (usage == android.media.AudioAttributes.USAGE_ASSISTANT
-                        || usage == android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION
-                        || usage == android.media.AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE) {
-                    busy = true;
-                }
-            }
-            quiet = busy ? 0 : quiet + 1;
+            quiet = alexaBusy(-1) ? 0 : quiet + 1;
             SystemClock.sleep(500);
         }
         journal("Alexa terminée après " + (SystemClock.elapsedRealtime() - start) + " ms");
+    }
+
+    /** Someone else is recording, or an assistant voice is playing. */
+    private boolean alexaBusy(int ownSession) {
+        if (othersRecording(ownSession) > 0) return true;
+        android.media.AudioManager am = getSystemService(android.media.AudioManager.class);
+        for (android.media.AudioPlaybackConfiguration p : am.getActivePlaybackConfigurations()) {
+            int usage = p.getAudioAttributes().getUsage();
+            if (usage == android.media.AudioAttributes.USAGE_ASSISTANT
+                    || usage == android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION
+                    || usage == android.media.AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Set while listening over Alexa's answer (see the loop): where her turn started, and when.
+    private volatile boolean bargeIn;
+    private boolean bargeFromHome;
+    private long bargeStart;
+
+    private void endBargeIn(long now) {
+        bargeIn = false;
+        hideCover();
+        journal("Alexa terminée après " + (now - bargeStart) + " ms de réponse");
+        if (bargeFromHome && !HomeActivity.inFront) returnHome();
+    }
+
+    /** Pauses whatever is playing (music started by Alexa, for one). */
+    private void pauseMedia() {
+        android.media.AudioManager am = getSystemService(android.media.AudioManager.class);
+        for (int action : new int[]{android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP}) {
+            am.dispatchMediaKeyEvent(new android.view.KeyEvent(action, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE));
+        }
     }
 
     /** Shows the invisible ReviveActivity and returns once it is on top (or after 3 s). */
